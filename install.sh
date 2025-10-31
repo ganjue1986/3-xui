@@ -1,194 +1,123 @@
 #!/bin/bash
-# ================================================================
-# 自定义 3x-ui 一键管理脚本（自动检测最新版）
-# 作者: ganjue1986
-# 仓库: https://github.com/ganjue1986/3-xui
-# ================================================================
+# 3x-ui Custom Installer by ganjue1986 (based on MHSanaei original)
 
-red='\033[0;31m'
-green='\033[0;32m'
-yellow='\033[0;33m'
-blue='\033[0;34m'
-plain='\033[0m'
-
-REPO="ganjue1986/3-xui"
+ZIP_URL="https://github.com/ganjue1986/3-xui/releases/download/1.1/3x-ui-2.6.2.zip"
 INSTALL_DIR="/usr/local/x-ui"
-SERVICE_FILE="/etc/systemd/system/x-ui.service"
 
-[[ $EUID -ne 0 ]] && echo -e "${red}❌ 请使用 root 权限运行此脚本${plain}" && exit 1
+red='\033[0;31m'; green='\033[0;32m'; yellow='\033[0;33m'; blue='\033[0;34m'; plain='\033[0m'
 
-# 检查架构
+[[ $EUID -ne 0 ]] && echo -e "${red}请使用 root 用户运行本脚本${plain}" && exit 1
+
 arch() {
-    case "$(uname -m)" in
-        x86_64 | amd64) echo "amd64" ;;
-        i*86) echo "386" ;;
-        armv8* | aarch64) echo "arm64" ;;
-        armv7* | armv7 | arm) echo "armv7" ;;
-        *) echo -e "${red}不支持的架构: $(uname -m)${plain}" && exit 1 ;;
-    esac
+  case "$(uname -m)" in
+    x86_64|amd64) echo "amd64";;
+    aarch64|arm64) echo "arm64";;
+    *) echo "unsupported";;
+  esac
 }
 
-# 检查 GLIBC 版本
-check_glibc_version() {
-    glibc_version=$(ldd --version | head -n1 | awk '{print $NF}')
-    required="2.32"
-    if [[ "$(printf '%s\n' "$required" "$glibc_version" | sort -V | head -n1)" != "$required" ]]; then
-        echo -e "${red}GLIBC 版本过低 ($glibc_version)，需要 ≥ 2.32${plain}"
-        exit 1
-    fi
+os_install_base() {
+  if [ -x "$(command -v apt-get)" ]; then
+    apt-get update && apt-get install -y curl wget unzip tar tzdata
+  elif [ -x "$(command -v yum)" ]; then
+    yum -y update && yum install -y curl wget unzip tar tzdata
+  else
+    echo -e "${red}不支持的系统${plain}" && exit 1
+  fi
 }
 
-# 安装依赖
-install_base() {
-    if command -v apt >/dev/null 2>&1; then
-        apt update -y && apt install -y curl unzip wget
-    elif command -v yum >/dev/null 2>&1; then
-        yum install -y curl unzip wget
-    elif command -v dnf >/dev/null 2>&1; then
-        dnf install -y curl unzip wget
-    else
-        echo -e "${red}无法识别的包管理器，请手动安装 curl unzip wget${plain}"
-        exit 1
-    fi
+gen_random_string() {
+  tr -dc 'A-Za-z0-9' </dev/urandom | head -c "${1:-12}"
 }
 
-# 获取公网 IP
-get_ip() {
-    curl -s --max-time 3 https://api.ipify.org || curl -s --max-time 3 https://4.ident.me
+config_after_install() {
+  local server_ip=$(curl -s https://api.ipify.org)
+  local username=$(gen_random_string 8)
+  local password=$(gen_random_string 10)
+  local webpath=$(gen_random_string 12)
+  local port=$(shuf -i 10000-60000 -n 1)
+
+  ${INSTALL_DIR}/x-ui setting -username "${username}" -password "${password}" -port "${port}" -webBasePath "${webpath}" >/dev/null 2>&1
+  ${INSTALL_DIR}/x-ui migrate >/dev/null 2>&1
+
+  echo -e "\n${green}安装完成！访问信息如下：${plain}"
+  echo "---------------------------------------------"
+  echo "地址: http://${server_ip}:${port}/${webpath}"
+  echo "用户名: ${username}"
+  echo "密码: ${password}"
+  echo "---------------------------------------------"
 }
 
-# 生成随机字符串
-gen_rand() {
-    local len=$1
-    tr -dc 'a-zA-Z0-9' </dev/urandom | fold -w "$len" | head -n 1
-}
-
-# 获取最新 release 版本 ZIP 下载链接
-get_latest_zip() {
-    curl -s "https://api.github.com/repos/$REPO/releases/latest" \
-    | grep "browser_download_url" \
-    | grep ".zip" \
-    | cut -d '"' -f 4 \
-    | head -n 1
-}
-
-# 安装 3x-ui
 install_xui() {
-    echo -e "${blue}📦 正在安装自定义 3x-ui...${plain}"
-    install_base
-    check_glibc_version
-    arch_type=$(arch)
+  echo -e "${yellow}正在安装 3x-ui ...${plain}"
+  os_install_base
+  mkdir -p ${INSTALL_DIR}
+  cd /usr/local || exit 1
 
-    systemctl stop x-ui >/dev/null 2>&1
-    rm -rf "$INSTALL_DIR"
-    mkdir -p "$INSTALL_DIR"
-    cd "$INSTALL_DIR" || exit 1
+  curl -L -o 3x-ui.zip ${ZIP_URL} || { echo "${red}下载失败${plain}"; exit 1; }
+  unzip -o 3x-ui.zip -d ${INSTALL_DIR} >/dev/null 2>&1
+  rm -f 3x-ui.zip
+  chmod +x ${INSTALL_DIR}/x-ui
 
-    echo -e "${yellow}🔍 检测最新版本...${plain}"
-    ZIP_URL=$(get_latest_zip)
-    if [[ -z "$ZIP_URL" ]]; then
-        echo -e "${red}❌ 获取最新版本失败，请检查仓库是否有 Release${plain}"
-        exit 1
-    fi
-    echo -e "${green}✅ 最新版本: $ZIP_URL${plain}"
-
-    echo -e "${yellow}⬇️  下载中...${plain}"
-    curl -L -o "$INSTALL_DIR/3x-ui.zip" "$ZIP_URL" || { echo -e "${red}下载失败${plain}"; exit 1; }
-
-    echo -e "${yellow}🧩 解压中...${plain}"
-    unzip -o 3x-ui.zip >/dev/null 2>&1
-    rm -f 3x-ui.zip
-    chmod +x x-ui
-
-    cat > "$SERVICE_FILE" <<EOF
+  cat >/etc/systemd/system/x-ui.service <<EOF
 [Unit]
-Description=3x-ui Service
+Description=3x-ui Panel Service
 After=network.target
 
 [Service]
 Type=simple
-WorkingDirectory=$INSTALL_DIR
-ExecStart=$INSTALL_DIR/x-ui
+ExecStart=${INSTALL_DIR}/x-ui
+WorkingDirectory=${INSTALL_DIR}
 Restart=always
+RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-    chmod +x /usr/local/x-ui/x-ui
-    ln -sf /usr/local/x-ui/x-ui /usr/bin/x-ui
+  systemctl daemon-reload
+  systemctl enable x-ui
+  systemctl restart x-ui
 
-    local ip=$(get_ip)
-    local username=$(gen_rand 8)
-    local password=$(gen_rand 10)
-    local port=$(shuf -i 10000-60000 -n 1)
-    local webpath=$(gen_rand 10)
-
-    /usr/local/x-ui/x-ui setting -username "$username" -password "$password" -port "$port" -webBasePath "$webpath" >/dev/null 2>&1
-    /usr/local/x-ui/x-ui migrate >/dev/null 2>&1
-
-    systemctl daemon-reload
-    systemctl enable x-ui
-    systemctl start x-ui
-
-    echo -e "\n${green}✅ 安装完成！${plain}"
-    echo -e "-------------------------------------------"
-    echo -e " 用户名: ${green}$username${plain}"
-    echo -e " 密码: ${green}$password${plain}"
-    echo -e " 端口: ${green}$port${plain}"
-    echo -e " 路径: ${green}/$webpath${plain}"
-    echo -e " 登录地址: ${blue}http://$ip:$port/$webpath${plain}"
-    echo -e "-------------------------------------------"
+  config_after_install
 }
 
-# 卸载
 uninstall_xui() {
-    echo -e "${red}⚠️ 确认要卸载 3x-ui 吗？(y/n)${plain}"
-    read -r confirm
-    [[ "$confirm" != "y" ]] && echo "取消卸载" && exit 0
-
-    systemctl stop x-ui
-    systemctl disable x-ui
-    rm -f "$SERVICE_FILE"
-    rm -rf "$INSTALL_DIR"
-    systemctl daemon-reload
-
-    echo -e "${green}✅ 已卸载${plain}"
+  systemctl stop x-ui
+  systemctl disable x-ui
+  rm -rf ${INSTALL_DIR} /etc/systemd/system/x-ui.service /usr/bin/x-ui
+  echo -e "${red}3x-ui 已彻底卸载${plain}"
 }
 
-# 查看状态
-status_xui() {
-    systemctl status x-ui --no-pager
+show_status() {
+  systemctl status x-ui --no-pager
 }
 
-# 重启
-restart_xui() {
-    systemctl restart x-ui
-    echo -e "${green}✅ 已重启${plain}"
-}
-
-# 菜单
 menu() {
-    clear
-    echo -e "=============================================="
-    echo -e " ${green}3x-ui 一键安装脚本 (自动检测版本)${plain}"
-    echo -e "=============================================="
-    echo -e " 1. 安装 3x-ui"
-    echo -e " 2. 卸载 3x-ui"
-    echo -e " 3. 重启 3x-ui"
-    echo -e " 4. 查看运行状态"
-    echo -e " 0. 退出"
-    echo -e "=============================================="
-    read -rp "请输入选项 [0-4]: " choice
+  clear
+  echo -e "${green}=========== 3x-ui 管理菜单 (自定义版) ===========${plain}"
+  echo "1. 安装 / 更新"
+  echo "2. 启动面板"
+  echo "3. 停止面板"
+  echo "4. 重启面板"
+  echo "5. 查看状态"
+  echo "6. 查看日志"
+  echo "7. 卸载面板"
+  echo "0. 退出"
+  echo "---------------------------------------------"
+  read -rp "请输入选项: " choice
 
-    case "$choice" in
-        1) install_xui ;;
-        2) uninstall_xui ;;
-        3) restart_xui ;;
-        4) status_xui ;;
-        0) exit 0 ;;
-        *) echo "❌ 无效选项" ;;
-    esac
+  case "$choice" in
+    1) install_xui ;;
+    2) systemctl start x-ui && echo "${green}已启动${plain}" ;;
+    3) systemctl stop x-ui && echo "${yellow}已停止${plain}" ;;
+    4) systemctl restart x-ui && echo "${green}已重启${plain}" ;;
+    5) show_status ;;
+    6) journalctl -u x-ui -e --no-pager ;;
+    7) uninstall_xui ;;
+    0) exit 0 ;;
+    *) echo "无效选项" ;;
+  esac
 }
 
 menu
